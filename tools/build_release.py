@@ -20,7 +20,8 @@ FIREFOX_XPI = 'hamlog-awards-firefox.xpi'
 REQUIRED_SIGNATURE_MEMBERS = {'META-INF/manifest.mf', 'META-INF/mozilla.sf', 'META-INF/mozilla.rsa'}
 OPTIONAL_SIGNATURE_MEMBERS = {'META-INF/', 'META-INF/cose.manifest', 'META-INF/cose.sig', 'recommendation.json'}
 FILES = (
-    'README.md', 'callsign.js', 'certificate-archive.js', 'options.css', 'options.html',
+    'README.md', 'callsign.js', 'certificate-archive.js', 'issued-progress.js', 'issued-service.js',
+    'options.css', 'options.html',
     'options.js', 'popup.css', 'popup.html', 'popup.js', 'runner.js', 'site-adapter.js',
     'update-service.js', 'updates.js',
 )
@@ -44,7 +45,10 @@ def build_zip(manifest):
 
 
 def firefox_manifest(base):
-    manifest = dict(base, background={'scripts': ['updates.js', 'update-service.js']})
+    manifest = dict(base, background={'scripts': [
+        'updates.js', 'callsign.js', 'certificate-archive.js', 'issued-progress.js',
+        'issued-service.js', 'update-service.js',
+    ]})
     manifest['browser_specific_settings'] = {'gecko': {
         'id': FIREFOX_ID,
         'strict_min_version': FIREFOX_MIN_VERSION,

@@ -1,6 +1,8 @@
 "use strict";
 
-if (typeof importScripts === "function") importScripts("updates.js");
+if (typeof importScripts === "function") {
+  importScripts("updates.js", "callsign.js", "issued-progress.js", "issued-service.js");
+}
 
 const extensionApi = globalThis.browser ?? globalThis.chrome;
 const { apiUrl, cacheKey, checkMessage, validateRelease, view } = globalThis.hamlogUpdates;

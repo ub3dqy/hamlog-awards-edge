@@ -61,8 +61,8 @@
   function certificateUrl(value) {
     const url = localUrl(value);
     if (!url || url.pathname !== downloadPath || url.hash) return null;
-    const keys = [...url.searchParams.keys()];
-    return keys.length === 1 && keys[0] === 'i' && /^[A-Za-z0-9_-]{16,256}$/.test(url.searchParams.get('i'))
+    const params = url.searchParams;
+    return params.size === 1 && /^[A-Za-z0-9_-]{16,256}$/.test(params.get('i') ?? '')
       ? url.href : null;
   }
 
@@ -334,7 +334,8 @@
         size += value.byteLength;
         if (size > maxPdfBytes) throw siteError('Размер PDF диплома превышает допустимый предел.');
         if (previousSize < prefix.length) {
-          prefix.set(value.subarray(0, prefix.length - previousSize), previousSize);
+          const length = Math.min(value.byteLength, prefix.length - previousSize);
+          for (let index = 0; index < length; index++) prefix[previousSize + index] = value[index];
           if (size >= prefix.length && pdfMagic.some((byte, index) => prefix[index] !== byte)) {
             throw siteError('Скачанный файл не прошёл проверку PDF.');
           }

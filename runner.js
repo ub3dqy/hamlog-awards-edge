@@ -195,6 +195,7 @@
           operation.controller.abort();
           panel.status.textContent = 'Останавливаем проверку…';
         } else if (operation.mode === 'download') {
+          void operation.progress?.deactivate().catch(() => {});
           operation.wakeRetry?.();
           panel.status.textContent = 'Остановимся после текущего файла…';
         } else {
@@ -349,7 +350,7 @@
     }
   }
 
-  async function sendDownloads(files, issuedState, restoredPart) {
+  async function sendDownloads(files, issuedState, restoredPart, progress) {
     if (!files.size) return false;
     const isArchive = files.size > 1;
     const partNumber = restoredPart?.number ?? (issuedState ? issuedState.parts.length + 1 : undefined);
@@ -377,9 +378,22 @@
       const part = restoredPart ?? {
         number: partNumber, keys: [...files.keys()], filename: file.filename, type: isArchive ? 'ZIP' : 'PDF'
       };
+      if (progress) {
+        let saved;
+        try {
+          saved = await progress.save(part, url);
+        } finally {
+          if (!saved) URL.revokeObjectURL(url);
+        }
+        if (!saved) {
+          warn('Браузер не завершил сохранение части. Нажмите «Скачать выданные», чтобы повторить сохранение.');
+          return false;
+        }
+        part.durable = true;
+      }
       if (!restoredPart) issuedState.parts.push(part);
       link = retainIssuedPart(issuedState, part, url, file.blob.size);
-      if (restoredPart) return true;
+      if (restoredPart || progress) return true;
     } else {
       link = document.createElement('a');
       link.href = url;
@@ -409,6 +423,7 @@
     let size = 0;
     let saved = false;
     let limited = false;
+    const activeText = panel.status.textContent;
     try {
       for (const [key, {award}] of downloads) {
         if (job?.stopping) break;
@@ -420,8 +435,14 @@
         if (issuedState?.nextFile?.key === key) {
           file = issuedState.nextFile.file;
           issuedState.nextFile = undefined;
+        } else if (issuedState?.staged?.has(key)) {
+          file = await job.progress.file(key);
         } else {
           file = await readFile(site, award, signal, job);
+          if (file && job?.progress) {
+            await job.progress.stage(key, file);
+            issuedState.staged.add(key);
+          }
         }
         if (!file && job?.stopping) break;
         if (file) {
@@ -436,7 +457,9 @@
         onFile?.(key, Boolean(file));
       }
     } finally {
-      saved = await sendDownloads(files, issuedState);
+      if (files.size && job?.progress) panel.status.textContent = 'Браузер сохраняет готовую часть…';
+      saved = await sendDownloads(files, issuedState, undefined, job?.progress);
+      if (files.size && job?.progress) panel.status.textContent = activeText;
       if (saved) {
         for (const key of files.keys()) {
           downloads.get(key).row?.append(' · файл готов к скачиванию');
@@ -555,30 +578,55 @@
     showDownloadResult(result);
   }
 
+  function keyedAwards(awards) {
+    const {key} = globalThis.hamlogIssuedProgress;
+    return Promise.all(awards.map(async award => ({...award, key: await key(award.key)})));
+  }
+
+  function issuedStateFor(progress) {
+    const state = current.issuedDownload ??= {
+      saved: new Set(), failed: new Set(), parts: [], retained: new Map(), bytes: 0
+    };
+    if (progress) {
+      state.durable = true;
+      state.saved = new Set(progress.parts.flatMap(part => part.keys));
+      state.staged = new Set(progress.staged);
+      for (const data of progress.parts.slice(state.parts.length)) {
+        const part = {...data, durable: true};
+        state.parts.push(part);
+        showIssuedPart(state, part);
+      }
+    }
+    return state;
+  }
+
   async function downloadIssued(site, job) {
     const {signal} = job.controller;
     panel.status.textContent = 'Читаем список уже выданных дипломов…';
     clear(panel.owned);
     clear(panel.unknown);
-    const awards = await retryIssued(job, () => site.owned(signal));
+    const issued = await retryIssued(job, () => site.owned(signal));
     if (job.stopping) {
       panel.status.textContent = 'Подготовка дипломов остановлена.';
       return;
     }
-    if (current.issuedDownload?.finished || !awards.length) {
+    const awards = job.progress ? await keyedAwards(issued) : issued;
+    const availableKeys = new Set(awards.map((award) => award.key));
+    const progress = job.progress && await job.progress.load([...availableKeys]);
+    if (current.issuedDownload && (
+      Boolean(current.issuedDownload.durable) !== Boolean(progress) ||
+      (!progress && (current.issuedDownload.finished || !awards.length))
+    )) {
       forgetIssuedParts(current.issuedDownload);
       clear(panel.parts);
       current.issuedDownload = undefined;
     }
+    const state = issuedStateFor(progress);
     if (!awards.length) {
       panel.status.textContent = 'HAMLOG пока не показывает выданных дипломов для этого позывного.';
       return;
     }
 
-    const state = current.issuedDownload ??= {
-      saved: new Set(), failed: new Set(), parts: [], retained: new Map(), bytes: 0
-    };
-    const availableKeys = new Set(awards.map((award) => award.key));
     if (state.nextFile && !availableKeys.has(state.nextFile.key)) state.nextFile = undefined;
     for (const seen of [state.saved, state.failed]) {
       for (const key of seen) {
@@ -593,7 +641,7 @@
       const url = issuedFileUrl(award);
       const row = addRow(panel.owned, award.label || award.title, url, 'Скачать');
       if (state.saved.has(award.key)) {
-        row.append(' · файл подготовлен');
+        row.append(progress ? ' · файл сохранён' : ' · файл подготовлен');
       } else if (!url) {
         row.append(' · ссылка на файл недоступна');
         state.failed.add(award.key);
@@ -614,7 +662,11 @@
     }
 
     const retrying = !pending.size && retry.size > 0;
-    const candidates = retrying ? retry : pending;
+    const remainingDownloads = retrying ? retry : pending;
+    const candidates = progress ? new Map([
+      ...[...remainingDownloads].filter(([key]) => state.staged.has(key)),
+      ...[...remainingDownloads].filter(([key]) => !state.staged.has(key))
+    ]) : remainingDownloads;
     const total = retrying ? retry.size : awards.length;
     let processed = retrying ? 0 : state.saved.size + state.failed.size;
     const reportProgress = () => {
@@ -639,6 +691,7 @@
         for (const key of keys) {
           state.saved.add(key);
           state.failed.delete(key);
+          state.staged?.delete(key);
         }
       }
     };
@@ -652,13 +705,14 @@
     if (job.stopping) panel.status.textContent = 'Подготовка дипломов остановлена.';
     else if (remaining) panel.status.textContent = 'Часть дипломов ещё не подготовлена.';
     else if (state.failed.size) panel.status.textContent = 'Обработка завершена с пропусками.';
-    else panel.status.textContent = 'Все выданные дипломы подготовлены.';
-    panel.detail.textContent = `Готово файлов: ${state.saved.size} из ${awards.length}.`;
-    if (state.parts.length) {
+    else panel.status.textContent = progress ? 'Все выданные дипломы сохранены.' : 'Все выданные дипломы подготовлены.';
+    panel.detail.textContent = `${progress ? 'Сохранено' : 'Готово'} файлов: ${state.saved.size} из ${awards.length}.`;
+    if (state.parts.length && !progress) {
       panel.detail.textContent += ' Если браузер пропустил загрузку, скачайте нужную часть из панели.';
     }
-    if (remaining || retry.size || state.failed.size > missingLinks) {
-      panel.detail.textContent += ' Чтобы продолжить, снова нажмите «Скачать выданные». Список сохраняется, пока эта вкладка открыта.';
+    if (remaining || (retrying && candidates.size) || state.failed.size > missingLinks) {
+      panel.detail.textContent += ' Чтобы продолжить, снова нажмите «Скачать выданные».';
+      if (!progress) panel.detail.textContent += ' Список сохраняется, пока эта вкладка открыта.';
     }
     if (state.failed.size) {
       panel.detail.textContent += ` Пока не подготовлено файлов: ${state.failed.size}. Ссылки для ручного скачивания — в списке ниже.`;
@@ -676,7 +730,8 @@
       panel.status.textContent = 'Подготовка части остановлена.';
       return;
     }
-    const awards = new Map(issued.map(award => [award.key, award]));
+    const identifiable = part.durable ? await keyedAwards(issued) : issued;
+    const awards = new Map(identifiable.map(award => [award.key, award]));
     const files = new Map();
     let size = 0;
     for (const key of part.keys) {
@@ -709,11 +764,11 @@
     }
   }
 
-  function run(mode, value, part) {
+  function run(mode, value, part, progressToken) {
     if (mode !== 'scan' && mode !== 'claim' && mode !== 'download') return {ok: false};
     if (operation) {
       showPanel();
-      return {ok: true, busy: true, callsign: current.callsign};
+      return {ok: true, busy: true, resumable: Boolean(progressToken && operation.progressToken === progressToken), callsign: current.callsign};
     }
     const callsign = globalThis.hamlogCallsign?.normalize?.(value);
     if (!callsign) return {ok: false};
@@ -721,12 +776,14 @@
     if (part && (mode !== 'download' || !current.issuedDownload?.parts.includes(part))) return {ok: false};
     showPanel();
     const site = globalThis.hamlogSite?.create?.(callsign);
-    if (!site || typeof navigator.locks?.request !== 'function') {
+    const issuedProgress = globalThis.hamlogIssuedProgress;
+    if (!site || !issuedProgress) {
       panel.status.textContent = 'Расширение не готово к работе в этой вкладке.';
       return {ok: false};
     }
 
-    const job = {mode, controller: new AbortController(), stopping: false};
+    const progress = progressToken && issuedProgress.connect(progressToken);
+    const job = {mode, controller: new AbortController(), stopping: false, progress, progressToken};
     operation = job;
     panel.action.textContent = 'Остановить';
     panel.action.disabled = false;
@@ -735,18 +792,28 @@
     panel.progress.hidden = true;
     for (const button of panel.parts.list.querySelectorAll('button')) button.disabled = true;
 
-    void navigator.locks.request('hamlog-awards-operation', {ifAvailable: true}, async (lock) => {
+    void issuedProgress.runExclusive(async lock => {
       if (!lock) {
         panel.status.textContent = 'Обработка уже идёт в другой вкладке HAMLOG.';
         return;
       }
       clear(panel.issues);
+      if (progress && job.stopping) {
+        panel.status.textContent = 'Подготовка дипломов остановлена.';
+        return;
+      }
       if (mode === 'scan') await scan(site, job);
       else if (mode === 'claim') await claim(site, job);
       else if (part) await restoreIssuedPart(site, job, part);
       else await downloadIssued(site, job);
+    }, Boolean(progress), () => {
+      job.stopping = true;
+      job.connectionLost = true;
+      job.controller.abort();
     }).catch((error) => {
-      if (job.controller.signal.aborted) {
+      if (job.connectionLost) {
+        panel.status.textContent = 'Связь с расширением прервалась. Запустите команду ещё раз.';
+      } else if (job.controller.signal.aborted) {
         panel.status.textContent = 'Проверка остановлена.';
       } else {
         panel.status.textContent = explain(error, 'Обработка прервана. Проверьте вход в HAMLOG и повторите попытку.');
@@ -754,7 +821,8 @@
           panel.detail.textContent += ' При повторном запуске в этой вкладке сверим результаты прерванной проверки.';
         }
       }
-    }).finally(() => {
+    }).finally(async () => {
+      if (!job.connectionLost) await progress?.deactivate().catch(() => {});
       operation = undefined;
       panel.action.textContent = 'Закрыть';
       panel.action.disabled = false;
