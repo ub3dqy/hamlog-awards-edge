@@ -13,8 +13,8 @@
       instructions: "Распакуйте ZIP в папку установленного расширения с заменой файлов. Откройте edge://extensions в Edge или chrome://extensions в Chrome. Нажмите «Перезагрузить» на карточке «Дипломы HAMLOG»."
     },
     firefox: {
-      name: "hamlog-awards-firefox.zip", format: "ZIP", types: zipTypes,
-      instructions: "Откройте about:debugging#/runtime/this-firefox и выберите ZIP через «Загрузить временное дополнение». Дополнение работает до перезапуска Firefox."
+      name: "hamlog-awards-firefox.xpi", format: "XPI", types: ["application/x-xpinstall", ...zipTypes],
+      instructions: "Откройте about:addons, нажмите на шестерёнку и выберите «Установить дополнение из файла». Откройте скачанный XPI и подтвердите установку."
     },
     yandex: {
       name: "hamlog-awards-yandex.crx", format: "CRX", types: ["application/x-chrome-extension", "application/octet-stream"],
