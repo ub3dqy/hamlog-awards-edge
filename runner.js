@@ -6,6 +6,8 @@
 
   const maxPreparedFiles = 100;
   const maxPreparedBytes = 96 * 1024 * 1024;
+  const maxRetainedIssuedBytes = 256 * 1024 * 1024;
+  const archiveOverhead = 128 * 1024;
   const sessions = new Map();
   let current;
   let operation;
@@ -105,15 +107,26 @@
     return row;
   }
 
+  function forgetIssuedParts(state) {
+    if (!state) return;
+    for (const url of state.urls) URL.revokeObjectURL(url);
+    state.urls = [];
+    state.bytes = 0;
+  }
+
   function selectCallsign(callsign) {
     if (current?.callsign === callsign) return;
     if (current) {
       const fileUrl = panel?.save.getAttribute('href');
       if (fileUrl) setTimeout(() => URL.revokeObjectURL(fileUrl), 60_000);
+      forgetIssuedParts(current.issuedDownload);
       panel?.host.remove();
       panel = undefined;
       for (const item of current.downloads.values()) item.row = undefined;
-      if (!current.downloads.size && !current.pendingRun?.visited.size) sessions.delete(current.callsign);
+      if (!current.downloads.size && !current.pendingRun?.visited.size &&
+          (!current.issuedDownload || current.issuedDownload.finished)) {
+        sessions.delete(current.callsign);
+      }
     }
     current = sessions.get(callsign) ?? {
       callsign,
@@ -147,6 +160,8 @@
         if (operation.mode === 'scan') {
           operation.controller.abort();
           panel.status.textContent = 'Останавливаем проверку…';
+        } else if (operation.mode === 'download') {
+          panel.status.textContent = 'Остановимся после текущего файла…';
         } else {
           panel.status.textContent = 'Остановимся после текущей страницы…';
         }
@@ -159,11 +174,23 @@
       progress.hidden = true;
       const save = element(box, 'a', '', 'save');
       save.hidden = true;
+      const parts = section(box, 'Файлы для скачивания');
+      parts.details.open = true;
+      const resume = element(box, 'button', 'Продолжить после сохранения файлов');
+      resume.type = 'button';
+      resume.hidden = true;
+      resume.addEventListener('click', () => {
+        if (operation) return;
+        forgetIssuedParts(current.issuedDownload);
+        clear(parts);
+        resume.hidden = true;
+        run('download', current.callsign);
+      });
       const owned = section(box, 'Ранее выданы');
       const unknown = section(box, 'Программы без записи о выдаче');
       const received = section(box, 'Новые дипломы');
       const issues = section(box, 'Требуют внимания');
-      panel = {host, action, status, detail, progress, save, owned, unknown, received, issues};
+      panel = {host, action, status, detail, progress, save, parts, resume, owned, unknown, received, issues};
       for (const item of current.downloads.values()) {
         item.row = addRow(received, item.award.label || item.award.title, item.award.downloadUrl, 'Скачать');
       }
@@ -254,7 +281,7 @@
     }
   }
 
-  async function sendDownloads(files) {
+  async function sendDownloads(files, issuedState) {
     if (!files.size) return false;
     const isArchive = files.size > 1;
     let file;
@@ -264,63 +291,93 @@
       file = certificates[0];
       if (isArchive) {
         const date = new Intl.DateTimeFormat('sv-SE', {timeZone: 'Europe/Moscow'}).format(new Date());
-        file = {blob: await globalThis.hamlogCertificateArchive.create(certificates), filename: `HAMLOG-${current.fileTag}-${date}.zip`};
+        const suffix = issuedState ? `-part-${issuedState.part}` : '';
+        file = {
+          blob: await globalThis.hamlogCertificateArchive.create(certificates),
+          filename: `HAMLOG-${current.fileTag}-${date}${suffix}.zip`
+        };
       }
       url = URL.createObjectURL(file.blob);
     } catch (error) {
-      warn(explain(error, 'Не удалось подготовить файлы. Откройте ссылки в списке «Новые дипломы» или повторите скачивание.'));
+      warn(explain(error, 'Не удалось подготовить файлы. Используйте ссылки ниже или повторите скачивание.'));
       return false;
     }
 
-    const link = panel.save;
-    const previousUrl = link.getAttribute('href');
+    const link = document.createElement('a');
     link.href = url;
     link.download = file.filename;
     link.title = file.filename;
-    link.textContent = isArchive ? 'Скачать последний ZIP-архив' : 'Скачать последний PDF';
-    link.hidden = false;
-    if (previousUrl) setTimeout(() => URL.revokeObjectURL(previousUrl), 60_000);
+    if (issuedState) {
+      const row = element(panel.parts.list, 'li');
+      link.textContent = `Скачать часть ${issuedState.part} (${isArchive ? 'ZIP' : 'PDF'})`;
+      row.append(link);
+      updateSection(panel.parts);
+      issuedState.urls.push(url);
+      issuedState.bytes += file.blob.size;
+    } else {
+      const previousLink = panel.save;
+      const previousUrl = previousLink.getAttribute('href');
+      link.className = 'save';
+      link.textContent = isArchive ? 'Скачать последний ZIP-архив' : 'Скачать последний PDF';
+      previousLink.replaceWith(link);
+      panel.save = link;
+      if (previousUrl) setTimeout(() => URL.revokeObjectURL(previousUrl), 60_000);
+    }
     try {
       link.click();
     } catch (error) {
-      warn(explain(error, 'Edge не запустил скачивание. Нажмите на ссылку готового файла.'));
+      warn(explain(error, 'Браузер не запустил скачивание. Нажмите на ссылку готового файла.'));
     }
 
-    const {downloads} = current;
-    for (const key of files.keys()) {
-      downloads.get(key).row.append(' · файл готов к скачиванию');
-      downloads.delete(key);
-    }
     return true;
+  }
+
+  async function downloadBatch(site, signal, downloads, {
+    maxBytes = maxPreparedBytes, issuedState, stopped, onFile, onSaved
+  } = {}) {
+    const files = new Map();
+    let size = 0;
+    let saved = false;
+    let limited = false;
+    try {
+      for (const [key, {award}] of downloads) {
+        if (stopped?.()) break;
+        if (files.size >= maxPreparedFiles || size >= maxBytes) {
+          limited = true;
+          break;
+        }
+        const file = await readFile(site, award, signal);
+        if (file) {
+          if (size + file.blob.size > maxBytes) {
+            limited = true;
+            break;
+          }
+          size += file.blob.size;
+          files.set(key, file);
+        }
+        onFile?.(key, Boolean(file));
+      }
+    } finally {
+      saved = await sendDownloads(files, issuedState);
+      if (saved) {
+        for (const key of files.keys()) {
+          downloads.get(key).row?.append(' · файл готов к скачиванию');
+          downloads.delete(key);
+        }
+        onSaved?.(files.keys());
+      }
+    }
+    return {saved, count: files.size, limited};
   }
 
   async function prepareDownloads(site, signal) {
     const {downloads} = current;
     if (!downloads.size) return {saved: false, count: 0};
     panel.status.textContent = 'Собираем файлы новых дипломов…';
-    const files = new Map();
-    let size = 0;
-    let saved = false;
     current.moreFiles = false;
-    try {
-      for (const [key, {award}] of downloads) {
-        if (files.size >= maxPreparedFiles || size >= maxPreparedBytes) {
-          current.moreFiles = true;
-          break;
-        }
-        const file = await readFile(site, award, signal);
-        if (!file) continue;
-        if (size + file.blob.size > maxPreparedBytes) {
-          current.moreFiles = true;
-          break;
-        }
-        size += file.blob.size;
-        files.set(key, file);
-      }
-    } finally {
-      saved = await sendDownloads(files);
-    }
-    return {saved, count: files.size};
+    const result = await downloadBatch(site, signal, downloads);
+    current.moreFiles = result.limited;
+    return result;
   }
 
   function showDownloadResult({saved, count}) {
@@ -420,8 +477,132 @@
     showDownloadResult(result);
   }
 
+  async function downloadIssued(site, job) {
+    const {signal} = job.controller;
+    panel.status.textContent = 'Читаем список уже выданных дипломов…';
+    panel.resume.hidden = true;
+    clear(panel.owned);
+    clear(panel.unknown);
+    const awards = await site.owned(signal);
+    if (current.issuedDownload?.finished || !awards.length) {
+      forgetIssuedParts(current.issuedDownload);
+      clear(panel.parts);
+      current.issuedDownload = undefined;
+    }
+    if (!awards.length) {
+      panel.status.textContent = 'HAMLOG пока не показывает выданных дипломов для этого позывного.';
+      return;
+    }
+
+    const state = current.issuedDownload ??= {
+      saved: new Set(), failed: new Set(), part: 1, urls: [], bytes: 0
+    };
+    const availableKeys = new Set(awards.map((award) => award.key));
+    for (const seen of [state.saved, state.failed]) {
+      for (const key of seen) {
+        if (!availableKeys.has(key)) seen.delete(key);
+      }
+    }
+
+    const pending = new Map();
+    const retry = new Map();
+    let missingLinks = 0;
+    for (const award of awards) {
+      const target = safeUrl(award.downloadUrl);
+      const url = target && new URL(target).pathname === '/dl.php' ? target : null;
+      const row = addRow(panel.owned, award.label || award.title, url, 'Скачать');
+      if (state.saved.has(award.key)) {
+        row.append(' · файл подготовлен');
+      } else if (!url) {
+        row.append(' · ссылка на файл недоступна');
+        state.failed.add(award.key);
+        missingLinks += 1;
+      } else {
+        const request = {award: {...award, url, downloadUrl: url}, row};
+        if (state.failed.has(award.key)) {
+          row.append(' · предыдущая попытка не удалась');
+          retry.set(award.key, request);
+        } else {
+          pending.set(award.key, request);
+        }
+      }
+    }
+    if (missingLinks) {
+      warn(`Ссылок на файлы не найдено: ${missingLinks}. Посмотрите раздел «Мои полученные дипломы» в HAMLOG.`,
+        {url: origin + '/account/awards.php'});
+    }
+
+    const retrying = !pending.size && retry.size > 0;
+    const candidates = retrying ? retry : pending;
+    const total = retrying ? retry.size : awards.length;
+    let processed = retrying ? 0 : state.saved.size + state.failed.size;
+    const reportProgress = () => {
+      showProgress(processed, total);
+      panel.detail.textContent = `Обработано ${processed} из ${total}.`;
+    };
+    panel.status.textContent = retrying ? 'Повторяем скачивание оставшихся дипломов…' : 'Готовим файлы выданных дипломов…';
+    reportProgress();
+    const update = {
+      issuedState: state,
+      stopped: () => job.stopping,
+      onFile: (key, ready) => {
+        if (!ready) {
+          state.failed.add(key);
+          candidates.get(key).row.append(' · файл не подготовлен');
+          candidates.delete(key);
+        }
+        processed += 1;
+        reportProgress();
+      },
+      onSaved: (keys) => {
+        for (const key of keys) {
+          state.saved.add(key);
+          state.failed.delete(key);
+        }
+        state.part += 1;
+      }
+    };
+
+    let quotaReached = false;
+    while (candidates.size && !job.stopping) {
+      const maxBytes = Math.min(maxPreparedBytes, maxRetainedIssuedBytes - state.bytes - archiveOverhead);
+      if (maxBytes <= 0) {
+        quotaReached = true;
+        break;
+      }
+      const result = await downloadBatch(site, signal, candidates, {...update, maxBytes});
+      if (!result.limited) break;
+      if (!result.saved) {
+        quotaReached = !result.count;
+        break;
+      }
+    }
+
+    const remaining = awards.length - state.saved.size - state.failed.size;
+    panel.resume.hidden = !quotaReached;
+    if (job.stopping) panel.status.textContent = 'Подготовка дипломов остановлена.';
+    else if (quotaReached) panel.status.textContent = 'Достигнут предел размера готовых файлов.';
+    else if (remaining) panel.status.textContent = 'Часть дипломов ещё не подготовлена.';
+    else if (state.failed.size) panel.status.textContent = 'Обработка завершена с пропусками.';
+    else panel.status.textContent = 'Все выданные дипломы подготовлены.';
+    panel.detail.textContent = `Готово файлов: ${state.saved.size} из ${awards.length}.`;
+    if (state.urls.length) {
+      panel.detail.textContent += ' Если браузер пропустил загрузку, нажмите на ссылку нужной части ниже.';
+    }
+    if (quotaReached) {
+      panel.detail.textContent += ' Сохраните готовые части и нажмите кнопку продолжения.';
+    } else if (remaining || retry.size || state.failed.size > missingLinks) {
+      panel.detail.textContent += ' Чтобы продолжить, снова нажмите «Скачать выданные». Список сохраняется, пока эта вкладка открыта.';
+    }
+    if (state.failed.size) {
+      panel.detail.textContent += ` Пока не подготовлено файлов: ${state.failed.size}. Ссылки для ручного скачивания — в списке ниже.`;
+      panel.owned.details.open = true;
+    }
+    state.finished = !remaining && !state.failed.size;
+  }
+
   function run(mode, value) {
-    if (mode !== 'scan' && mode !== 'claim') return {ok: false};
+    if (mode !== 'scan' && mode !== 'claim' && mode !== 'download') return {ok: false};
     if (operation) {
       showPanel();
       return {ok: true, busy: true, callsign: current.callsign};
@@ -451,7 +632,8 @@
       }
       clear(panel.issues);
       if (mode === 'scan') await scan(site, job);
-      else await claim(site, job);
+      else if (mode === 'claim') await claim(site, job);
+      else await downloadIssued(site, job);
     }).catch((error) => {
       if (job.controller.signal.aborted) {
         panel.status.textContent = 'Проверка остановлена.';

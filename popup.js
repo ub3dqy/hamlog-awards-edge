@@ -1,8 +1,10 @@
 "use strict";
 
+const extensionApi = globalThis.browser ?? globalThis.chrome;
 const siteOrigin = "https://hamlog.online";
 const scanButton = document.getElementById("scan");
 const claimButton = document.getElementById("claim");
+const downloadButton = document.getElementById("download");
 const settingsLink = document.getElementById("settings");
 const callsignLine = document.getElementById("callsign");
 const statusLine = document.getElementById("status");
@@ -14,16 +16,17 @@ let launchPending = false;
 function setButtonsEnabled(enabled) {
   scanButton.disabled = !enabled;
   claimButton.disabled = !enabled;
+  downloadButton.disabled = !enabled;
 }
 
 async function getHamlogTab() {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const [tab] = await extensionApi.tabs.query({ active: true, currentWindow: true });
   if (typeof tab?.id !== "number" || !tab.url) return null;
   return new URL(tab.url).origin === siteOrigin ? tab : null;
 }
 
 async function getContext() {
-  const [{ callsign }, tab] = await Promise.all([chrome.storage.local.get("callsign"), getHamlogTab()]);
+  const [{ callsign }, tab] = await Promise.all([extensionApi.storage.local.get("callsign"), getHamlogTab()]);
   return { callsign: globalThis.hamlogCallsign.normalize(callsign), tab };
 }
 
@@ -32,7 +35,7 @@ function showContext(callsign, tab) {
   if (!callsign) {
     statusLine.textContent = "Укажите свой позывной в настройках расширения.";
   } else if (!tab) {
-    statusLine.textContent = "Откройте HAMLOG в Edge и войдите в свой кабинет.";
+    statusLine.textContent = "Откройте HAMLOG и войдите в свой кабинет.";
   } else {
     statusLine.textContent = "Ход работы появится на странице HAMLOG. Оставьте вкладку открытой.";
   }
@@ -65,11 +68,11 @@ async function launch(mode) {
     callsignLine.textContent = callsign;
 
     const target = { tabId: tab.id };
-    await chrome.scripting.executeScript({
+    await extensionApi.scripting.executeScript({
       target,
       files: ["callsign.js", "site-adapter.js", "certificate-archive.js", "runner.js"]
     });
-    const [{ result }] = await chrome.scripting.executeScript({
+    const [{ result }] = await extensionApi.scripting.executeScript({
       target,
       args: [mode, callsign],
       func: (operation, selectedCallsign) => {
@@ -92,7 +95,7 @@ async function launch(mode) {
 async function openSettings(event) {
   event.preventDefault();
   try {
-    await chrome.runtime.openOptionsPage();
+    await extensionApi.runtime.openOptionsPage();
   } catch {
     statusLine.textContent = "Не удалось открыть настройки расширения.";
   }
@@ -110,8 +113,9 @@ settingsLink.addEventListener("click", openSettings);
 updateLink.addEventListener("click", openSettings);
 scanButton.addEventListener("click", () => void launch("scan"));
 claimButton.addEventListener("click", () => void launch("claim"));
-chrome.storage.onChanged.addListener((changes, area) => {
+downloadButton.addEventListener("click", () => void launch("download"));
+extensionApi.storage.onChanged.addListener((changes, area) => {
   if (area === "local" && updates.cacheKey in changes) showUpdate(changes[updates.cacheKey].newValue);
 });
-void chrome.storage.local.get(updates.cacheKey).then(data => showUpdate(data[updates.cacheKey]), () => {});
+void extensionApi.storage.local.get(updates.cacheKey).then(data => showUpdate(data[updates.cacheKey]), () => {});
 void initialize();

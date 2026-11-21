@@ -1,11 +1,32 @@
 (() => {
   "use strict";
 
-  const manifest = chrome.runtime.getManifest();
+  const extensionApi = globalThis.browser ?? globalThis.chrome;
+  const manifest = extensionApi.runtime.getManifest();
   const project = manifest.homepage_url;
   const repository = new URL(project).pathname.slice(1);
   const apiUrl = `https://api.github.com/repos/${repository}/releases/latest`;
-  const archiveName = "hamlog-awards-edge.zip";
+  const zipTypes = ["application/zip", "application/x-zip-compressed", "application/octet-stream"];
+  const packages = {
+    chromium: {
+      name: "hamlog-awards-edge.zip", format: "ZIP", types: zipTypes,
+      instructions: "Распакуйте ZIP в папку установленного расширения с заменой файлов. Откройте edge://extensions в Edge или chrome://extensions в Chrome. Нажмите «Перезагрузить» на карточке «Дипломы HAMLOG»."
+    },
+    firefox: {
+      name: "hamlog-awards-firefox.zip", format: "ZIP", types: zipTypes,
+      instructions: "Откройте about:debugging#/runtime/this-firefox и выберите ZIP через «Загрузить временное дополнение». Дополнение работает до перезапуска Firefox."
+    },
+    yandex: {
+      name: "hamlog-awards-yandex.crx", format: "CRX", types: ["application/x-chrome-extension", "application/octet-stream"],
+      instructions: "Откройте browser://tune и перетащите скачанный CRX в окно Яндекс Браузера."
+    }
+  };
+  let selectedPackage = packages.chromium;
+  if (manifest.browser_specific_settings?.gecko?.id === "hamlog-awards@ub3dqy.com") {
+    selectedPackage = packages.firefox;
+  } else if (manifest.version_name === "Яндекс Браузер") {
+    selectedPackage = packages.yandex;
+  }
   const cacheKey = "releaseCheck";
   const checkMessage = "hamlog-check-release";
 
@@ -21,7 +42,7 @@
   }
 
   function downloadUrl(tag) {
-    return `${project}/releases/download/${tag}/${archiveName}`;
+    return `${project}/releases/download/${tag}/${selectedPackage.name}`;
   }
 
   function validateRelease(payload) {
@@ -32,9 +53,9 @@
 
     const assets = Array.isArray(payload.assets) ? payload.assets : [];
     const ready = assets.some(asset =>
-      asset?.name === archiveName && asset.state === "uploaded" &&
+      asset?.name === selectedPackage.name && asset.state === "uploaded" &&
       Number.isSafeInteger(asset.size) && asset.size > 0 &&
-      ["application/zip", "application/x-zip-compressed", "application/octet-stream"].includes(asset.content_type) &&
+      selectedPackage.types.includes(asset.content_type) &&
       asset.browser_download_url === downloadUrl(parsed.tag)
     );
     return { tag: parsed.tag, ready };
@@ -58,6 +79,7 @@
 
   globalThis.hamlogUpdates = Object.freeze({
     project, apiUrl, cacheKey, checkMessage, validateRelease, view,
+    instructions: selectedPackage.instructions, packageFormat: selectedPackage.format,
     releases: `${project}/releases`, developer: "https://ub3dqy.com/"
   });
 })();

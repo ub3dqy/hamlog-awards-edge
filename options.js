@@ -1,5 +1,6 @@
 "use strict";
 
+const extensionApi = globalThis.browser ?? globalThis.chrome;
 const form = document.querySelector("form");
 const callsignInput = document.getElementById("callsign");
 const saveButton = document.getElementById("save");
@@ -13,7 +14,7 @@ const updates = globalThis.hamlogUpdates;
 
 async function load() {
   try {
-    const { callsign } = await chrome.storage.local.get("callsign");
+    const { callsign } = await extensionApi.storage.local.get("callsign");
     callsignInput.value = globalThis.hamlogCallsign.normalize(callsign) || "";
     statusLine.textContent = "";
   } catch {
@@ -40,7 +41,7 @@ async function save(event) {
   saveButton.disabled = true;
   callsignInput.readOnly = true;
   try {
-    await chrome.storage.local.set({ callsign });
+    await extensionApi.storage.local.set({ callsign });
     callsignInput.value = callsign;
     statusLine.textContent = `Позывной ${callsign} сохранён.`;
   } catch {
@@ -75,7 +76,7 @@ function showUpdate(state) {
   if (release.available) {
     updateStatus.textContent = release.download
       ? `Доступна версия ${release.version}.`
-      : `Доступна версия ${release.version}. ZIP для Edge пока отсутствует.`;
+      : `Доступна версия ${release.version}. ${updates.packageFormat} для этого браузера пока отсутствует.`;
   } else if (release.status === "release" && release.version) {
     updateStatus.textContent = "У вас актуальная версия.";
   } else if (release.status === "empty") {
@@ -86,14 +87,16 @@ function showUpdate(state) {
 }
 
 async function readUpdateState() {
-  const { [updates.cacheKey]: state } = await chrome.storage.local.get(updates.cacheKey);
+  const { [updates.cacheKey]: state } = await extensionApi.storage.local.get(updates.cacheKey);
   showUpdate(state);
 }
 
 document.getElementById("installed-version").textContent = updates.view().installed;
 document.getElementById("developer-link").href = updates.developer;
 document.getElementById("project-link").href = updates.project;
-chrome.storage.onChanged.addListener((changes, area) => {
+downloadLink.textContent = `Скачать ${updates.packageFormat}`;
+updateHelp.textContent = updates.instructions;
+extensionApi.storage.onChanged.addListener((changes, area) => {
   if (area === "local" && updates.cacheKey in changes) showUpdate(changes[updates.cacheKey].newValue);
 });
 updateButton.addEventListener("click", async () => {
@@ -101,7 +104,7 @@ updateButton.addEventListener("click", async () => {
   updateButton.disabled = true;
   updateStatus.textContent = "Проверяю GitHub…";
   try {
-    const result = await chrome.runtime.sendMessage({ type: updates.checkMessage });
+    const result = await extensionApi.runtime.sendMessage({ type: updates.checkMessage });
     if (!result?.ok) throw new Error("Update check unavailable");
     await readUpdateState();
   } catch {

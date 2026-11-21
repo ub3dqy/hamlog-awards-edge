@@ -1,7 +1,8 @@
 "use strict";
 
-importScripts("updates.js");
+if (typeof importScripts === "function") importScripts("updates.js");
 
+const extensionApi = globalThis.browser ?? globalThis.chrome;
 const { apiUrl, cacheKey, checkMessage, validateRelease, view } = globalThis.hamlogUpdates;
 const updateAlarm = "hamlog-github-release";
 const checkIntervalMinutes = 24 * 60;
@@ -9,7 +10,7 @@ const minimumInterval = 23 * 60 * 60 * 1000;
 let pendingCheck;
 
 async function check(force) {
-  const { [cacheKey]: previous } = await chrome.storage.local.get(cacheKey);
+  const { [cacheKey]: previous } = await extensionApi.storage.local.get(cacheKey);
   const checkedAt = Date.now();
   const age = checkedAt - previous?.checkedAt;
   if (!force && age >= 0 && age < minimumInterval) return previous;
@@ -34,13 +35,13 @@ async function check(force) {
     if (previous?.release) state.release = previous.release;
   }
 
-  await chrome.storage.local.set({ [cacheKey]: state });
+  await extensionApi.storage.local.set({ [cacheKey]: state });
   return state;
 }
 
 async function checkAndShowBadge(force) {
   const release = view(await check(force));
-  await chrome.action.setBadgeText({ text: release.available && release.download ? "↑" : "" });
+  await extensionApi.action.setBadgeText({ text: release.available && release.download ? "↑" : "" });
 }
 
 function refresh(force = false) {
@@ -51,21 +52,23 @@ function refresh(force = false) {
 }
 
 async function ensureAlarm() {
-  if (!await chrome.alarms.get(updateAlarm)) {
-    await chrome.alarms.create(updateAlarm, { periodInMinutes: checkIntervalMinutes });
+  if (!await extensionApi.alarms.get(updateAlarm)) {
+    await extensionApi.alarms.create(updateAlarm, { periodInMinutes: checkIntervalMinutes });
   }
 }
 
-chrome.runtime.onInstalled.addListener(() => { void refresh().catch(() => {}); });
-chrome.runtime.onStartup.addListener(() => { void refresh().catch(() => {}); });
-chrome.alarms.onAlarm.addListener(alarm => {
+extensionApi.runtime.onInstalled.addListener(() => { void refresh().catch(() => {}); });
+extensionApi.runtime.onStartup.addListener(() => { void refresh().catch(() => {}); });
+extensionApi.alarms.onAlarm.addListener(alarm => {
   if (alarm.name === updateAlarm) void refresh().catch(() => {});
 });
-chrome.runtime.onMessage.addListener((message, sender, respond) => {
-  if (message?.type !== checkMessage || sender.url !== chrome.runtime.getURL("options.html")) return;
+extensionApi.runtime.onMessage.addListener((message, sender, respond) => {
+  if (message?.type !== checkMessage || sender.url !== extensionApi.runtime.getURL("options.html")) return;
   void refresh(true).then(() => respond({ ok: true }), () => respond({ ok: false }));
   return true;
 });
 
-void chrome.storage.local.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" }).catch(() => {});
+if (typeof extensionApi.storage.local.setAccessLevel === "function") {
+  void extensionApi.storage.local.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" }).catch(() => {});
+}
 void ensureAlarm().catch(() => {});

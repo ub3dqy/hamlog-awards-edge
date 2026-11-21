@@ -86,12 +86,12 @@ button:not(:disabled):hover {
   background: var(--button-hover);
 }
 
-#claim {
+#claim, #download {
   background: transparent;
   color: var(--button);
 }
 
-#claim:not(:disabled):hover {
+#claim:not(:disabled):hover, #download:not(:disabled):hover {
   background: var(--button-hover);
   color: var(--button-text);
 }
