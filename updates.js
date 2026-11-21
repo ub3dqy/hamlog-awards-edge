@@ -14,7 +14,7 @@
     },
     firefox: {
       name: "hamlog-awards-firefox.xpi", format: "XPI", types: ["application/x-xpinstall", ...zipTypes],
-      instructions: "Откройте about:addons, нажмите на шестерёнку и выберите «Установить дополнение из файла». Откройте скачанный XPI и подтвердите установку."
+      instructions: "Firefox устанавливает подписанные обновления автоматически, если автообновление включено. Для ручной установки скачайте XPI и выберите «Установить дополнение из файла» через шестерёнку на странице about:addons."
     },
     yandex: {
       name: "hamlog-awards-yandex.crx", format: "CRX", types: ["application/x-chrome-extension", "application/octet-stream"],

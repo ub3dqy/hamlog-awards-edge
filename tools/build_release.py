@@ -12,6 +12,11 @@ from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile, ZipInfo
 
 ROOT = Path(__file__).resolve().parents[1]
 MAX_XPI_BYTES = 8 * 1024**2
+FIREFOX_ID = 'hamlog-awards@ub3dqy.com'
+FIREFOX_MIN_VERSION = '140.0'
+FIREFOX_RELEASES = 'https://github.com/ub3dqy/hamlog-awards-edge/releases'
+FIREFOX_UPDATE_URL = f'{FIREFOX_RELEASES}/latest/download/updates.json'
+FIREFOX_XPI = 'hamlog-awards-firefox.xpi'
 REQUIRED_SIGNATURE_MEMBERS = {'META-INF/manifest.mf', 'META-INF/mozilla.sf', 'META-INF/mozilla.rsa'}
 OPTIONAL_SIGNATURE_MEMBERS = {'META-INF/', 'META-INF/cose.manifest', 'META-INF/cose.sig', 'recommendation.json'}
 FILES = (
@@ -41,11 +46,22 @@ def build_zip(manifest):
 def firefox_manifest(base):
     manifest = dict(base, background={'scripts': ['updates.js', 'update-service.js']})
     manifest['browser_specific_settings'] = {'gecko': {
-        'id': 'hamlog-awards@ub3dqy.com',
-        'strict_min_version': '140.0',
+        'id': FIREFOX_ID,
+        'strict_min_version': FIREFOX_MIN_VERSION,
+        'update_url': FIREFOX_UPDATE_URL,
         'data_collection_permissions': {'required': ['personallyIdentifyingInfo', 'websiteContent']},
     }}
     return manifest
+
+
+def firefox_updates(version, xpi):
+    update = {
+        'version': version,
+        'update_link': f'{FIREFOX_RELEASES}/download/v{version}/{FIREFOX_XPI}',
+        'update_hash': f'sha256:{hashlib.sha256(xpi).hexdigest()}',
+        'applications': {'gecko': {'strict_min_version': FIREFOX_MIN_VERSION}},
+    }
+    return {'addons': {FIREFOX_ID: {'updates': [update]}}}
 
 
 def read_signed_firefox(path, manifest):
@@ -135,7 +151,7 @@ def main():
         yandex = dict(base, version_name='Яндекс Браузер')
         packages = {
             'hamlog-awards-edge.zip': build_zip(base),
-            'hamlog-awards-firefox.xpi': firefox_xpi,
+            FIREFOX_XPI: firefox_xpi,
             'hamlog-awards-yandex.crx': build_crx(build_zip(yandex), args.openssl, key),
         }
     output.mkdir(parents=True, exist_ok=False)
@@ -144,6 +160,9 @@ def main():
         (output / name).write_bytes(data)
         checksums.append(f'{hashlib.sha256(data).hexdigest()}  {name}\n')
     (output / 'SHA256SUMS.txt').write_text(''.join(checksums), encoding='ascii', newline='\n')
+    if not args.firefox_only:
+        updates = firefox_updates(base['version'], firefox_xpi)
+        (output / 'updates.json').write_text(json.dumps(updates, indent=2) + '\n', encoding='utf-8')
 
 
 if __name__ == '__main__':
