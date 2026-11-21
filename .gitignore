@@ -1,0 +1,12 @@
+*.zip
+SHA256SUMS.txt
+node_modules/
+__pycache__/
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+*.har
+*.log
+*.pdf

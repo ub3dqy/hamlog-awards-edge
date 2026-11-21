@@ -1,0 +1,134 @@
+:root {
+  color-scheme: light dark;
+  --background: #faf9f6;
+  --text: #16253b;
+  --muted: #48566b;
+  --divider: #dedfdf;
+  --button: #173854;
+  --button-hover: #245372;
+  --button-text: #fff;
+  --focus: #a45122;
+  font: 14px/1.45 "Segoe UI", system-ui, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #182230;
+    --text: #f3f6fa;
+    --muted: #bdc8d7;
+    --divider: #425263;
+    --button: #a7d4f2;
+    --button-hover: #d2eafa;
+    --button-text: #112a40;
+    --focus: #ffaa73;
+  }
+}
+
+body {
+  width: 320px;
+  margin: 0;
+  background: var(--background);
+  color: var(--text);
+}
+
+main {
+  padding: 20px;
+}
+
+h1 {
+  margin: 0;
+  font-size: 22px;
+  line-height: 1.2;
+}
+
+header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+#settings {
+  flex: none;
+  color: var(--button);
+  font-size: 13px;
+}
+
+.callsign {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font: 600 13px/1.5 "Cascadia Mono", Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+
+.intro {
+  margin: 14px 0;
+}
+
+.actions {
+  display: grid;
+  gap: 8px;
+}
+
+button {
+  border: 1px solid var(--button);
+  border-radius: 6px;
+  padding: 10px 12px;
+  background: var(--button);
+  color: var(--button-text);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+button:not(:disabled):hover {
+  border-color: var(--button-hover);
+  background: var(--button-hover);
+}
+
+#claim {
+  background: transparent;
+  color: var(--button);
+}
+
+#claim:not(:disabled):hover {
+  background: var(--button-hover);
+  color: var(--button-text);
+}
+
+button:focus-visible, a:focus-visible, input:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+#status {
+  min-height: 2.9em;
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+#update-notice {
+  margin: 8px 0 0;
+  font-weight: 600;
+}
+
+#update-notice a, .credits a {
+  color: var(--button);
+}
+
+.credits {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  border-top: 1px solid var(--divider);
+  margin-top: 14px;
+  padding-top: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}

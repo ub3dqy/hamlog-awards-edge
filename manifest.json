@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "Дипломы HAMLOG",
+  "version": "1.2.0",
+  "description": "Проверка и получение бесплатных электронных дипломов HAMLOG по вашему позывному.",
+  "homepage_url": "https://github.com/ub3dqy/hamlog-awards-edge",
+  "permissions": ["activeTab", "scripting", "storage", "alarms"],
+  "host_permissions": ["https://api.github.com/*"],
+  "background": {
+    "service_worker": "update-service.js"
+  },
+  "action": {
+    "default_title": "Дипломы HAMLOG",
+    "default_popup": "popup.html"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  }
+}

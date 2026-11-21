@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Настройки дипломов HAMLOG</title>
+    <link rel="stylesheet" href="popup.css">
+    <link rel="stylesheet" href="options.css">
+    <script src="callsign.js" defer></script>
+    <script src="updates.js" defer></script>
+    <script src="options.js" defer></script>
+  </head>
+  <body class="options-page">
+    <main>
+      <h1>Настройки дипломов HAMLOG</h1>
+      <form novalidate>
+        <label for="callsign">Позывной</label>
+        <input type="text" id="callsign" name="callsign" maxlength="64" required autocomplete="off" autocapitalize="characters" spellcheck="false" aria-describedby="callsign-help save-status" disabled>
+        <p id="callsign-help">Введите позывной из вашего кабинета HAMLOG. Например, RA3AA, RA3AA/P или UA 9821SWL.</p>
+        <button type="submit" id="save" disabled>Сохранить</button>
+        <p id="save-status" role="status" aria-live="polite">Загружаю настройки…</p>
+      </form>
+      <section class="update-section" aria-labelledby="updates-heading">
+        <h2 id="updates-heading">Обновления</h2>
+        <p>Установленная версия <span id="installed-version"></span></p>
+        <p id="update-status" role="status" aria-live="polite">Проверяю сведения о версии…</p>
+        <button type="button" id="check-updates">Проверить обновления</button>
+        <div class="release-links">
+          <a id="download-update" target="_blank" rel="noopener noreferrer" hidden>Скачать ZIP</a>
+          <a id="release-link" target="_blank" rel="noopener noreferrer" hidden>Открыть выпуск на GitHub</a>
+        </div>
+        <p id="update-help" hidden>Распакуйте ZIP в папку установленного расширения с заменой файлов. Откройте <code>edge://extensions</code> и нажмите «Перезагрузить» на карточке «Дипломы HAMLOG».</p>
+      </section>
+      <footer class="credits">
+        <span>Разработчик <a id="developer-link" target="_blank" rel="noopener noreferrer">UB3DQY</a></span>
+        <a id="project-link" target="_blank" rel="noopener noreferrer">GitHub</a>
+      </footer>
+    </main>
+  </body>
+</html>

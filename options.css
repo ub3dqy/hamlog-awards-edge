@@ -1,0 +1,64 @@
+.options-page {
+  width: auto;
+}
+
+.options-page main {
+  width: min(100%, 520px);
+  box-sizing: border-box;
+  margin: 48px auto 0;
+}
+
+.options-page form {
+  margin-top: 24px;
+}
+
+.options-page label {
+  display: block;
+  margin-bottom: 6px;
+  font-weight: 600;
+}
+
+#callsign {
+  box-sizing: border-box;
+  width: min(100%, 240px);
+  border: 1px solid var(--muted);
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: var(--background);
+  color: var(--text);
+  font: inherit;
+  text-transform: uppercase;
+}
+
+#callsign[aria-invalid="true"] {
+  border-color: var(--focus);
+}
+
+#callsign-help, #save-status {
+  margin: 8px 0 16px;
+  color: var(--muted);
+}
+
+#save-status {
+  min-height: 1.45em;
+}
+
+.update-section {
+  border-top: 1px solid var(--divider);
+  padding-top: 16px;
+}
+
+.update-section h2 {
+  margin: 0;
+  font-size: 17px;
+}
+
+.release-links a:not([hidden]) {
+  display: inline-block;
+  margin: 12px 14px 0 0;
+  color: var(--button);
+}
+
+#update-help {
+  color: var(--muted);
+}
