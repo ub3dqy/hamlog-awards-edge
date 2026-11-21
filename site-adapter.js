@@ -149,7 +149,7 @@
       const cells = row.cells;
       if (cells.length === 1 && cells[0].colSpan === 6 && cells[0].matches('.dataTables_empty, .dt-empty')) continue;
       const title = label(cells[1]);
-      const station = cells[2]?.querySelector('a[href]');
+      const station = cells[2]?.querySelector('a[href]') || cells[2];
       const date = label(cells[3]);
       const number = label(cells[4]);
       if (cells.length !== 6 || !title || !label(station) || !/\p{Number}/u.test(date) || !/\p{Number}/u.test(number)) {
