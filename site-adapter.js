@@ -28,6 +28,20 @@
     return siteError(message, true);
   }
 
+  function retryableError(message, fatal = false, retryAfter = 0) {
+    const error = siteError(message, fatal);
+    error.retryable = true;
+    error.retryAfter = retryAfter;
+    return error;
+  }
+
+  function retryAfterDelay(response) {
+    const value = response.headers.get('retry-after')?.trim();
+    if (!value) return 0;
+    const delay = /^\d+$/.test(value) ? Number(value) * 1000 : Date.parse(value) - Date.now();
+    return Number.isFinite(delay) ? Math.min(2_147_483_647, Math.max(0, delay)) : 0;
+  }
+
   function localUrl(value, base = origin) {
     if (!value) return null;
     try {
@@ -72,15 +86,20 @@
     signal.throwIfAborted();
     nextRequestAt = Date.now() + 900;
     const headers = xhr ? { 'X-Requested-With': 'XMLHttpRequest' } : {};
+    const timeout = AbortSignal.timeout(24_000);
     try {
       const response = await fetch(url.href, {
         method: body ? 'POST' : 'GET', body, headers,
         credentials: 'same-origin', cache: 'no-store', redirect: 'manual',
         referrer, referrerPolicy: 'same-origin',
-        signal: AbortSignal.any([signal, AbortSignal.timeout(24000)])
+        signal: AbortSignal.any([signal, timeout])
       });
-      if (response.status === 429 || response.status === 503) {
+      if (response.status === 429) {
         throw stop('HAMLOG ограничил запросы или временно недоступен. Повторите позже.');
+      }
+      if ([408, 502, 503, 504].includes(response.status)) {
+        throw retryableError('HAMLOG временно недоступен. Повторите позже.',
+          response.status === 503, retryAfterDelay(response));
       }
       if (response.status === 401 || response.status === 403) {
         throw stop('HAMLOG не подтвердил доступ. Проверьте, что вы вошли в кабинет.');
@@ -94,8 +113,10 @@
       return await consume(response);
     } catch (error) {
       signal.throwIfAborted();
-      if (error.name === 'TimeoutError') throw siteError('HAMLOG не ответил вовремя.');
-      if (error instanceof TypeError) throw siteError('Не удалось связаться с HAMLOG.');
+      if (timeout.aborted || error.name === 'TimeoutError') throw retryableError('HAMLOG не ответил вовремя.');
+      if (error instanceof TypeError || error.name === 'AbortError') {
+        throw retryableError('Не удалось связаться с HAMLOG.');
+      }
       throw error;
     }
   }
@@ -296,7 +317,8 @@
 
   async function readPdf(response) {
     const type = response.headers.get('content-type')?.split(';')[0].trim().toLowerCase();
-    if (type !== 'application/pdf' || !response.body || Number(response.headers.get('content-length')) > maxPdfBytes) {
+    const expectedSize = Number(response.headers.get('content-length'));
+    if (type !== 'application/pdf' || !response.body || expectedSize > maxPdfBytes) {
       throw siteError('HAMLOG не вернул PDF диплома допустимого размера.');
     }
 
@@ -324,6 +346,10 @@
       throw error;
     } finally {
       reader.releaseLock();
+    }
+    const encoding = response.headers.get('content-encoding')?.trim().toLowerCase();
+    if (expectedSize > 0 && (!encoding || encoding === 'identity') && size !== expectedSize) {
+      throw retryableError('Загрузка PDF прервалась.');
     }
     if (size < prefix.length) throw siteError('Скачанный файл не прошёл проверку PDF.');
     return new Blob(slices, { type });

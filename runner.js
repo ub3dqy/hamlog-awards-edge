@@ -7,6 +7,7 @@
   const maxPreparedFiles = 100;
   const maxPreparedBytes = 96 * 1024 * 1024;
   const maxRetainedIssuedBytes = 256 * 1024 * 1024;
+  const maxRetryDelay = 30_000;
   const sessions = new Map();
   let current;
   let operation;
@@ -112,6 +113,7 @@
     for (const part of state.parts) part.row = undefined;
     state.retained.clear();
     state.bytes = 0;
+    state.nextFile = undefined;
   }
 
   function showIssuedPart(state, part) {
@@ -193,6 +195,7 @@
           operation.controller.abort();
           panel.status.textContent = 'Останавливаем проверку…';
         } else if (operation.mode === 'download') {
+          operation.wakeRetry?.();
           panel.status.textContent = 'Остановимся после текущего файла…';
         } else {
           panel.status.textContent = 'Остановимся после текущей страницы…';
@@ -298,9 +301,45 @@
     return target && new URL(target).pathname === '/dl.php' ? target : null;
   }
 
-  async function readFile(site, award, signal) {
+  function waitForRetry(job, delay, wakeOnConnect) {
+    return new Promise(resolve => {
+      const wake = () => {
+        clearTimeout(timer);
+        globalThis.removeEventListener('online', wake);
+        job.wakeRetry = undefined;
+        resolve();
+      };
+      const timer = setTimeout(wake, delay);
+      job.wakeRetry = wake;
+      if (wakeOnConnect) globalThis.addEventListener('online', wake, {once: true});
+    });
+  }
+
+  async function retryIssued(job, request) {
+    const status = panel.status.textContent;
+    let backoff = 2_000;
+    while (!job.stopping) {
+      try {
+        const result = await request();
+        if (!job.stopping && panel.status.textContent !== status) panel.status.textContent = status;
+        return result;
+      } catch (error) {
+        if (!error?.retryable) throw error;
+        if (job.stopping) break;
+        const delay = navigator.onLine ? backoff : maxRetryDelay;
+        panel.status.textContent = 'Связь с HAMLOG прервалась. Продолжим автоматически…';
+        await waitForRetry(job, Math.max(delay, error.retryAfter ?? 0), !error.retryAfter);
+        backoff = Math.min(backoff * 2, maxRetryDelay);
+      }
+    }
+  }
+
+  async function readFile(site, award, signal, job) {
     try {
-      const {blob, filename: originalName} = await site.readCertificate(award.downloadUrl, signal);
+      const read = () => site.readCertificate(award.downloadUrl, signal);
+      const result = job ? await retryIssued(job, read) : await read();
+      if (!result && job?.stopping) return null;
+      const {blob, filename: originalName} = result;
       if (!(blob instanceof Blob) || !blob.size) throw new Error('Empty certificate');
       return {blob, filename: filename(originalName)};
     } catch (error) {
@@ -364,7 +403,7 @@
   }
 
   async function downloadBatch(site, signal, downloads, {
-    issuedState, stopped, onFile, onSaved
+    issuedState, job, onFile, onSaved
   } = {}) {
     const files = new Map();
     let size = 0;
@@ -372,14 +411,22 @@
     let limited = false;
     try {
       for (const [key, {award}] of downloads) {
-        if (stopped?.()) break;
+        if (job?.stopping) break;
         if (files.size >= maxPreparedFiles || size >= maxPreparedBytes) {
           limited = true;
           break;
         }
-        const file = await readFile(site, award, signal);
+        let file;
+        if (issuedState?.nextFile?.key === key) {
+          file = issuedState.nextFile.file;
+          issuedState.nextFile = undefined;
+        } else {
+          file = await readFile(site, award, signal, job);
+        }
+        if (!file && job?.stopping) break;
         if (file) {
           if (size + file.blob.size > maxPreparedBytes) {
+            if (issuedState) issuedState.nextFile = {key, file};
             limited = true;
             break;
           }
@@ -513,7 +560,11 @@
     panel.status.textContent = 'Читаем список уже выданных дипломов…';
     clear(panel.owned);
     clear(panel.unknown);
-    const awards = await site.owned(signal);
+    const awards = await retryIssued(job, () => site.owned(signal));
+    if (job.stopping) {
+      panel.status.textContent = 'Подготовка дипломов остановлена.';
+      return;
+    }
     if (current.issuedDownload?.finished || !awards.length) {
       forgetIssuedParts(current.issuedDownload);
       clear(panel.parts);
@@ -528,6 +579,7 @@
       saved: new Set(), failed: new Set(), parts: [], retained: new Map(), bytes: 0
     };
     const availableKeys = new Set(awards.map((award) => award.key));
+    if (state.nextFile && !availableKeys.has(state.nextFile.key)) state.nextFile = undefined;
     for (const seen of [state.saved, state.failed]) {
       for (const key of seen) {
         if (!availableKeys.has(key)) seen.delete(key);
@@ -573,7 +625,7 @@
     reportProgress();
     const update = {
       issuedState: state,
-      stopped: () => job.stopping,
+      job,
       onFile: (key, ready) => {
         if (!ready) {
           state.failed.add(key);
@@ -619,7 +671,12 @@
     const {signal} = job.controller;
     panel.status.textContent = `Собираем часть ${part.number} заново…`;
     showProgress(0, part.keys.length);
-    const awards = new Map((await site.owned(signal)).map(award => [award.key, award]));
+    const issued = await retryIssued(job, () => site.owned(signal));
+    if (job.stopping) {
+      panel.status.textContent = 'Подготовка части остановлена.';
+      return;
+    }
+    const awards = new Map(issued.map(award => [award.key, award]));
     const files = new Map();
     let size = 0;
     for (const key of part.keys) {
@@ -631,7 +688,7 @@
           {title: award?.label || award?.title, url: origin + '/account/awards.php'});
         break;
       }
-      const file = await readFile(site, {...award, url: downloadUrl, downloadUrl}, signal);
+      const file = await readFile(site, {...award, url: downloadUrl, downloadUrl}, signal, job);
       if (!file) break;
       size += file.blob.size;
       if (size > maxPreparedBytes) {
