@@ -7,7 +7,6 @@
   const maxPreparedFiles = 100;
   const maxPreparedBytes = 96 * 1024 * 1024;
   const maxRetainedIssuedBytes = 256 * 1024 * 1024;
-  const archiveOverhead = 128 * 1024;
   const sessions = new Map();
   let current;
   let operation;
@@ -109,9 +108,42 @@
 
   function forgetIssuedParts(state) {
     if (!state) return;
-    for (const url of state.urls) URL.revokeObjectURL(url);
-    state.urls = [];
+    for (const {url} of state.retained.values()) URL.revokeObjectURL(url);
+    for (const part of state.parts) part.row = undefined;
+    state.retained.clear();
     state.bytes = 0;
+  }
+
+  function showIssuedPart(state, part) {
+    const row = part.row ??= element(panel.parts.list, 'li');
+    row.replaceChildren();
+    updateSection(panel.parts);
+    const retained = state.retained.get(part);
+    if (retained) {
+      const link = element(row, 'a', `Скачать часть ${part.number} (${part.type})`);
+      link.href = retained.url;
+      link.download = part.filename;
+      link.title = part.filename;
+      return link;
+    }
+    const button = element(row, 'button', `Собрать часть ${part.number} заново`);
+    button.type = 'button';
+    button.disabled = Boolean(operation);
+    button.addEventListener('click', () => run('download', current.callsign, part));
+  }
+
+  function retainIssuedPart(state, part, url, size) {
+    // Keep recent files available as links. Older parts retain their list of awards for retry.
+    for (const [previous, retained] of state.retained) {
+      if (state.bytes + size <= maxRetainedIssuedBytes) break;
+      URL.revokeObjectURL(retained.url);
+      state.retained.delete(previous);
+      state.bytes -= retained.size;
+      showIssuedPart(state, previous);
+    }
+    state.retained.set(part, {url, size});
+    state.bytes += size;
+    return showIssuedPart(state, part);
   }
 
   function selectCallsign(callsign) {
@@ -176,21 +208,13 @@
       save.hidden = true;
       const parts = section(box, 'Файлы для скачивания');
       parts.details.open = true;
-      const resume = element(box, 'button', 'Продолжить после сохранения файлов');
-      resume.type = 'button';
-      resume.hidden = true;
-      resume.addEventListener('click', () => {
-        if (operation) return;
-        forgetIssuedParts(current.issuedDownload);
-        clear(parts);
-        resume.hidden = true;
-        run('download', current.callsign);
-      });
       const owned = section(box, 'Ранее выданы');
       const unknown = section(box, 'Программы без записи о выдаче');
       const received = section(box, 'Новые дипломы');
       const issues = section(box, 'Требуют внимания');
-      panel = {host, action, status, detail, progress, save, parts, resume, owned, unknown, received, issues};
+      panel = {host, action, status, detail, progress, save, parts, owned, unknown, received, issues};
+      const issuedState = current.issuedDownload;
+      for (const part of issuedState?.parts ?? []) showIssuedPart(issuedState, part);
       for (const item of current.downloads.values()) {
         item.row = addRow(received, item.award.label || item.award.title, item.award.downloadUrl, 'Скачать');
       }
@@ -269,6 +293,11 @@
     return /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(sanitized) ? `_${sanitized}` : sanitized;
   }
 
+  function issuedFileUrl(award) {
+    const target = safeUrl(award?.downloadUrl);
+    return target && new URL(target).pathname === '/dl.php' ? target : null;
+  }
+
   async function readFile(site, award, signal) {
     try {
       const {blob, filename: originalName} = await site.readCertificate(award.downloadUrl, signal);
@@ -281,9 +310,10 @@
     }
   }
 
-  async function sendDownloads(files, issuedState) {
+  async function sendDownloads(files, issuedState, restoredPart) {
     if (!files.size) return false;
     const isArchive = files.size > 1;
+    const partNumber = restoredPart?.number ?? (issuedState ? issuedState.parts.length + 1 : undefined);
     let file;
     let url;
     try {
@@ -291,7 +321,7 @@
       file = certificates[0];
       if (isArchive) {
         const date = new Intl.DateTimeFormat('sv-SE', {timeZone: 'Europe/Moscow'}).format(new Date());
-        const suffix = issuedState ? `-part-${issuedState.part}` : '';
+        const suffix = partNumber ? `-part-${partNumber}` : '';
         file = {
           blob: await globalThis.hamlogCertificateArchive.create(certificates),
           filename: `HAMLOG-${current.fileTag}-${date}${suffix}.zip`
@@ -303,18 +333,19 @@
       return false;
     }
 
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = file.filename;
-    link.title = file.filename;
+    let link;
     if (issuedState) {
-      const row = element(panel.parts.list, 'li');
-      link.textContent = `Скачать часть ${issuedState.part} (${isArchive ? 'ZIP' : 'PDF'})`;
-      row.append(link);
-      updateSection(panel.parts);
-      issuedState.urls.push(url);
-      issuedState.bytes += file.blob.size;
+      const part = restoredPart ?? {
+        number: partNumber, keys: [...files.keys()], filename: file.filename, type: isArchive ? 'ZIP' : 'PDF'
+      };
+      if (!restoredPart) issuedState.parts.push(part);
+      link = retainIssuedPart(issuedState, part, url, file.blob.size);
+      if (restoredPart) return true;
     } else {
+      link = document.createElement('a');
+      link.href = url;
+      link.download = file.filename;
+      link.title = file.filename;
       const previousLink = panel.save;
       const previousUrl = previousLink.getAttribute('href');
       link.className = 'save';
@@ -333,7 +364,7 @@
   }
 
   async function downloadBatch(site, signal, downloads, {
-    maxBytes = maxPreparedBytes, issuedState, stopped, onFile, onSaved
+    issuedState, stopped, onFile, onSaved
   } = {}) {
     const files = new Map();
     let size = 0;
@@ -342,13 +373,13 @@
     try {
       for (const [key, {award}] of downloads) {
         if (stopped?.()) break;
-        if (files.size >= maxPreparedFiles || size >= maxBytes) {
+        if (files.size >= maxPreparedFiles || size >= maxPreparedBytes) {
           limited = true;
           break;
         }
         const file = await readFile(site, award, signal);
         if (file) {
-          if (size + file.blob.size > maxBytes) {
+          if (size + file.blob.size > maxPreparedBytes) {
             limited = true;
             break;
           }
@@ -480,7 +511,6 @@
   async function downloadIssued(site, job) {
     const {signal} = job.controller;
     panel.status.textContent = 'Читаем список уже выданных дипломов…';
-    panel.resume.hidden = true;
     clear(panel.owned);
     clear(panel.unknown);
     const awards = await site.owned(signal);
@@ -495,7 +525,7 @@
     }
 
     const state = current.issuedDownload ??= {
-      saved: new Set(), failed: new Set(), part: 1, urls: [], bytes: 0
+      saved: new Set(), failed: new Set(), parts: [], retained: new Map(), bytes: 0
     };
     const availableKeys = new Set(awards.map((award) => award.key));
     for (const seen of [state.saved, state.failed]) {
@@ -508,8 +538,7 @@
     const retry = new Map();
     let missingLinks = 0;
     for (const award of awards) {
-      const target = safeUrl(award.downloadUrl);
-      const url = target && new URL(target).pathname === '/dl.php' ? target : null;
+      const url = issuedFileUrl(award);
       const row = addRow(panel.owned, award.label || award.title, url, 'Скачать');
       if (state.saved.has(award.key)) {
         row.append(' · файл подготовлен');
@@ -559,39 +588,24 @@
           state.saved.add(key);
           state.failed.delete(key);
         }
-        state.part += 1;
       }
     };
 
-    let quotaReached = false;
     while (candidates.size && !job.stopping) {
-      const maxBytes = Math.min(maxPreparedBytes, maxRetainedIssuedBytes - state.bytes - archiveOverhead);
-      if (maxBytes <= 0) {
-        quotaReached = true;
-        break;
-      }
-      const result = await downloadBatch(site, signal, candidates, {...update, maxBytes});
-      if (!result.limited) break;
-      if (!result.saved) {
-        quotaReached = !result.count;
-        break;
-      }
+      const result = await downloadBatch(site, signal, candidates, update);
+      if (!result.limited || !result.saved) break;
     }
 
     const remaining = awards.length - state.saved.size - state.failed.size;
-    panel.resume.hidden = !quotaReached;
     if (job.stopping) panel.status.textContent = 'Подготовка дипломов остановлена.';
-    else if (quotaReached) panel.status.textContent = 'Достигнут предел размера готовых файлов.';
     else if (remaining) panel.status.textContent = 'Часть дипломов ещё не подготовлена.';
     else if (state.failed.size) panel.status.textContent = 'Обработка завершена с пропусками.';
     else panel.status.textContent = 'Все выданные дипломы подготовлены.';
     panel.detail.textContent = `Готово файлов: ${state.saved.size} из ${awards.length}.`;
-    if (state.urls.length) {
-      panel.detail.textContent += ' Если браузер пропустил загрузку, нажмите на ссылку нужной части ниже.';
+    if (state.parts.length) {
+      panel.detail.textContent += ' Если браузер пропустил загрузку, скачайте нужную часть из панели.';
     }
-    if (quotaReached) {
-      panel.detail.textContent += ' Сохраните готовые части и нажмите кнопку продолжения.';
-    } else if (remaining || retry.size || state.failed.size > missingLinks) {
+    if (remaining || retry.size || state.failed.size > missingLinks) {
       panel.detail.textContent += ' Чтобы продолжить, снова нажмите «Скачать выданные». Список сохраняется, пока эта вкладка открыта.';
     }
     if (state.failed.size) {
@@ -601,7 +615,44 @@
     state.finished = !remaining && !state.failed.size;
   }
 
-  function run(mode, value) {
+  async function restoreIssuedPart(site, job, part) {
+    const {signal} = job.controller;
+    panel.status.textContent = `Собираем часть ${part.number} заново…`;
+    showProgress(0, part.keys.length);
+    const awards = new Map((await site.owned(signal)).map(award => [award.key, award]));
+    const files = new Map();
+    let size = 0;
+    for (const key of part.keys) {
+      if (job.stopping) break;
+      const award = awards.get(key);
+      const downloadUrl = issuedFileUrl(award);
+      if (!downloadUrl) {
+        warn('Ссылка на диплом недоступна. Проверьте список выданных дипломов в HAMLOG.',
+          {title: award?.label || award?.title, url: origin + '/account/awards.php'});
+        break;
+      }
+      const file = await readFile(site, {...award, url: downloadUrl, downloadUrl}, signal);
+      if (!file) break;
+      size += file.blob.size;
+      if (size > maxPreparedBytes) {
+        warn('После изменений в HAMLOG файлы этой части больше не помещаются в один архив.',
+          {url: origin + '/account/awards.php'});
+        break;
+      }
+      files.set(key, file);
+      showProgress(files.size, part.keys.length);
+    }
+
+    if (job.stopping) {
+      panel.status.textContent = 'Подготовка части остановлена.';
+    } else if (files.size === part.keys.length && await sendDownloads(files, current.issuedDownload, part)) {
+      panel.status.textContent = `Часть ${part.number} готова. Нажмите на ссылку в списке файлов.`;
+    } else {
+      panel.status.textContent = `Не удалось собрать часть ${part.number} целиком.`;
+    }
+  }
+
+  function run(mode, value, part) {
     if (mode !== 'scan' && mode !== 'claim' && mode !== 'download') return {ok: false};
     if (operation) {
       showPanel();
@@ -610,6 +661,7 @@
     const callsign = globalThis.hamlogCallsign?.normalize?.(value);
     if (!callsign) return {ok: false};
     selectCallsign(callsign);
+    if (part && (mode !== 'download' || !current.issuedDownload?.parts.includes(part))) return {ok: false};
     showPanel();
     const site = globalThis.hamlogSite?.create?.(callsign);
     if (!site || typeof navigator.locks?.request !== 'function') {
@@ -624,6 +676,7 @@
     panel.status.textContent = 'Запускаем…';
     panel.detail.textContent = '';
     panel.progress.hidden = true;
+    for (const button of panel.parts.list.querySelectorAll('button')) button.disabled = true;
 
     void navigator.locks.request('hamlog-awards-operation', {ifAvailable: true}, async (lock) => {
       if (!lock) {
@@ -633,6 +686,7 @@
       clear(panel.issues);
       if (mode === 'scan') await scan(site, job);
       else if (mode === 'claim') await claim(site, job);
+      else if (part) await restoreIssuedPart(site, job, part);
       else await downloadIssued(site, job);
     }).catch((error) => {
       if (job.controller.signal.aborted) {
@@ -647,6 +701,7 @@
       operation = undefined;
       panel.action.textContent = 'Закрыть';
       panel.action.disabled = false;
+      for (const button of panel.parts.list.querySelectorAll('button')) button.disabled = false;
       panel.received.details.open = panel.received.list.childElementCount > 0;
       panel.issues.details.open = panel.issues.list.childElementCount > 0;
       if (!panel.progress.hasAttribute('value')) panel.progress.hidden = true;
