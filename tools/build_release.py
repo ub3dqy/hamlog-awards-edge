@@ -64,6 +64,14 @@ def read_signed_firefox(path, manifest):
                 or entries - REQUIRED_SIGNATURE_MEMBERS - OPTIONAL_SIGNATURE_MEMBERS != expected.keys()
                 or any(archive.getinfo(name).file_size == 0 for name in REQUIRED_SIGNATURE_MEMBERS)):
             raise ValueError('Unexpected Firefox package members or missing Mozilla signature files.')
+        # Mozilla can reformat the manifest during signing, so compare the parsed JSON.
+        filename = 'manifest.json'
+        if not 0 < archive.getinfo(filename).file_size <= 64 * 1024:
+            raise ValueError('Invalid signed Firefox manifest size.')
+        signed_manifest = json.loads(archive.read(filename))
+        if json.dumps(signed_manifest, sort_keys=True) != json.dumps(manifest, sort_keys=True):
+            raise ValueError('The signed Firefox manifest differs from the source checkout.')
+        del expected[filename]
         for name, contents in expected.items():
             if archive.getinfo(name).file_size != len(contents) or archive.read(name) != contents:
                 raise ValueError(f'Firefox package differs from the source checkout: {name}')
