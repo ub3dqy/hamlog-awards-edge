@@ -4,6 +4,7 @@
   const origin = 'https://hamlog.online';
   if (location.origin !== origin || globalThis.hamlogAwards) return;
 
+  const awardsPage = origin + '/account/awards.php';
   const maxPreparedFiles = 100;
   const maxPreparedBytes = 96 * 1024 * 1024;
   const maxRetainedIssuedBytes = 256 * 1024 * 1024;
@@ -240,6 +241,10 @@
     addRow(panel.issues, `${prefix}${message}`, entry?.url, 'Открыть');
   }
 
+  function warnSkippedIssued(count) {
+    if (count) warn(`Пропущено строк списка выданных дипломов — ${count}.`, {url: awardsPage});
+  }
+
   function explain(error, fallback) {
     return typeof error?.userMessage === 'string' && error.userMessage.trim()
       ? error.userMessage
@@ -256,11 +261,11 @@
     return url ? new URL(url).pathname.replace(/\/+$/, '') : null;
   }
 
-  async function readCatalog(site, signal) {
+  async function readCatalog(site, signal, options) {
     panel.status.textContent = 'Собираем программы из каталога HAMLOG…';
     panel.progress.hidden = false;
     panel.progress.removeAttribute('value');
-    const catalog = await site.catalog(signal);
+    const catalog = await site.catalog(signal, options);
     signal.throwIfAborted();
     for (const message of catalog.warnings ?? []) warn(message);
     if (!Array.isArray(catalog.entries) || !catalog.entries.length || !Array.isArray(catalog.issued)) {
@@ -275,10 +280,17 @@
     clear(panel.owned);
     clear(panel.unknown);
     const catalog = await readCatalog(site, job.controller.signal);
-    const knownPages = new Set(catalog.issued.map(award => pageKey(award.url)).filter(Boolean));
     for (const award of catalog.issued) {
       addRow(panel.owned, award.label || award.title, award.downloadUrl || award.url, 'Открыть');
     }
+    showProgress(catalog.entries.length, catalog.entries.length);
+    if (catalog.skippedIssued) {
+      warnSkippedIssued(catalog.skippedIssued);
+      panel.status.textContent = 'Каталог сверён с пропусками.';
+      panel.detail.textContent = `Программ: ${catalog.entries.length}. Распознано выданных дипломов: ${catalog.issued.length}.`;
+      return;
+    }
+    const knownPages = new Set(catalog.issued.map(award => pageKey(award.url)).filter(Boolean));
     let unknown = 0;
     for (const entry of catalog.entries) {
       if (!knownPages.has(pageKey(entry.url))) {
@@ -286,7 +298,6 @@
         unknown += 1;
       }
     }
-    showProgress(catalog.entries.length, catalog.entries.length);
     panel.status.textContent = catalog.warnings?.length ? 'Каталог сверён с пропусками.' : 'Каталог сверён с выданными дипломами.';
     panel.detail.textContent = `Программ: ${catalog.entries.length}. Выдано дипломов: ${catalog.issued.length}. Без записи о выдаче: ${unknown}. HAMLOG проверит выполнение условий при запуске «Получить и скачать новые».`;
   }
@@ -526,7 +537,7 @@
       showDownloadResult(result);
       return;
     }
-    const catalog = await readCatalog(site, signal);
+    const catalog = await readCatalog(site, signal, {requireComplete: true});
     let issued = current.pendingRun ? confirmNew(catalog.issued) : 0;
     const pendingRun = {
       before: new Set(catalog.issued.map(award => award.key)),
@@ -560,7 +571,8 @@
     panel.action.disabled = true;
     if (pendingRun.visited.size) {
       panel.status.textContent = 'Сверяем новые выдачи со списком HAMLOG…';
-      issued += confirmNew(await site.owned(signal));
+      const confirmed = await site.owned(signal, {requireComplete: true});
+      issued += confirmNew(confirmed.awards);
     } else {
       current.pendingRun = undefined;
     }
@@ -610,9 +622,10 @@
       panel.status.textContent = 'Подготовка дипломов остановлена.';
       return;
     }
-    const awards = job.progress ? await keyedAwards(issued) : issued;
+    warnSkippedIssued(issued.skipped);
+    const awards = job.progress ? await keyedAwards(issued.awards) : issued.awards;
     const availableKeys = new Set(awards.map((award) => award.key));
-    const progress = job.progress && await job.progress.load([...availableKeys]);
+    const progress = job.progress && await job.progress.load([...availableKeys], {complete: !issued.skipped});
     if (current.issuedDownload && (
       Boolean(current.issuedDownload.durable) !== Boolean(progress) ||
       (!progress && (current.issuedDownload.finished || !awards.length))
@@ -623,7 +636,9 @@
     }
     const state = issuedStateFor(progress);
     if (!awards.length) {
-      panel.status.textContent = 'HAMLOG пока не показывает выданных дипломов для этого позывного.';
+      panel.status.textContent = issued.skipped
+        ? 'Не удалось прочитать список выданных дипломов.'
+        : 'HAMLOG пока не показывает выданных дипломов для этого позывного.';
       return;
     }
 
@@ -658,7 +673,7 @@
     }
     if (missingLinks) {
       warn(`Ссылок на файлы не найдено: ${missingLinks}. Посмотрите раздел «Мои полученные дипломы» в HAMLOG.`,
-        {url: origin + '/account/awards.php'});
+        {url: awardsPage});
     }
 
     const retrying = !pending.size && retry.size > 0;
@@ -704,7 +719,7 @@
     const remaining = awards.length - state.saved.size - state.failed.size;
     if (job.stopping) panel.status.textContent = 'Подготовка дипломов остановлена.';
     else if (remaining) panel.status.textContent = 'Часть дипломов ещё не подготовлена.';
-    else if (state.failed.size) panel.status.textContent = 'Обработка завершена с пропусками.';
+    else if (state.failed.size || issued.skipped) panel.status.textContent = 'Обработка завершена с пропусками.';
     else panel.status.textContent = progress ? 'Все выданные дипломы сохранены.' : 'Все выданные дипломы подготовлены.';
     panel.detail.textContent = `${progress ? 'Сохранено' : 'Готово'} файлов: ${state.saved.size} из ${awards.length}.`;
     if (state.parts.length && !progress) {
@@ -718,7 +733,7 @@
       panel.detail.textContent += ` Пока не подготовлено файлов: ${state.failed.size}. Ссылки для ручного скачивания — в списке ниже.`;
       panel.owned.details.open = true;
     }
-    state.finished = !remaining && !state.failed.size;
+    state.finished = !remaining && !state.failed.size && !issued.skipped;
   }
 
   async function restoreIssuedPart(site, job, part) {
@@ -730,7 +745,8 @@
       panel.status.textContent = 'Подготовка части остановлена.';
       return;
     }
-    const identifiable = part.durable ? await keyedAwards(issued) : issued;
+    warnSkippedIssued(issued.skipped);
+    const identifiable = part.durable ? await keyedAwards(issued.awards) : issued.awards;
     const awards = new Map(identifiable.map(award => [award.key, award]));
     const files = new Map();
     let size = 0;

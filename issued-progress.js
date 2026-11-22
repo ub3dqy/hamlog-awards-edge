@@ -65,9 +65,9 @@
       return result;
     }
     return {
-      async load(keys) {
+      async load(keys, {complete = true} = {}) {
         await settle(await request('poll'));
-        return request('load', {keys});
+        return request('load', {keys, complete});
       },
       async file(key) {
         const entry = await request('file', {key});

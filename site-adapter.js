@@ -79,7 +79,7 @@
 
   async function request(path, signal, { body, xhr = false, referrer } = {}, consume) {
     const url = localUrl(path);
-    if (location.origin !== origin || !url) throw stop('Откройте HAMLOG в Edge.');
+    if (location.origin !== origin || !url) throw stop('Откройте вкладку HAMLOG.');
     signal.throwIfAborted();
     const delay = nextRequestAt - Date.now();
     if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
@@ -155,35 +155,82 @@
     return root;
   }
 
-  function issuedRows(root, callsign) {
+  function emptyIssuedRow(cells, columnCount) {
+    if (cells.length !== 1 || cells[0].querySelector('a[href], button, input')) return false;
+    const cell = cells[0];
+    if (cell.matches('.dataTables_empty, .dt-empty')) return true;
+    const message = /^(?:записи отсутствуют|нет данных(?: в таблице)?|нет выданных дипломов|no data available in table|no matching records found|no awards issued)[.!…]*$/i;
+    return cell.colSpan === columnCount && message.test(label(cell));
+  }
+
+  function issuedRows(root, callsign, {requireComplete = false} = {}) {
     const list = root.querySelector('#myawards-md #id1, #myawards-md #id2');
     const columns = list?.tHead?.rows[0]?.cells;
     if (columns?.length !== 6 || !list.tBodies.length) {
       throw stop('HAMLOG не показал ожидаемую таблицу уже выданных дипломов.');
     }
-    const stationColumn = [...columns].findIndex((column) => /^(?:позывной|call ?sign)$/i.test(label(column)));
-    if (stationColumn !== -1 && stationColumn !== 2) {
+    const headings = Array.from(columns, label);
+    const expected = [
+      [1, /^(?:название|award name|title)$/i],
+      [2, /^(?:позывной|call ?sign)$/i],
+      [3, /^(?:дата выдачи|дата|issue date|date issued|date)$/i],
+      [4, /^(?:номер диплома|award number|certificate number)$/i]
+    ];
+    if (expected.some(([index, pattern]) => !pattern.test(headings[index]) && headings.some(name => pattern.test(name)))) {
       throw stop('HAMLOG изменил порядок столбцов списка выданных дипломов. Выдача остановлена.');
     }
+
     const issued = new Map();
+    const ambiguous = new Set();
+    const normalize = globalThis.hamlogCallsign.normalize;
+    let skipped = 0;
     for (const row of [...list.tBodies].flatMap((body) => [...body.rows])) {
       const cells = row.cells;
-      if (cells.length === 1 && cells[0].colSpan === 6 && cells[0].matches('.dataTables_empty, .dt-empty')) continue;
-      const title = label(cells[1]);
-      const station = cells[2]?.querySelector('a[href]') || cells[2];
+      if (emptyIssuedRow(cells, columns.length)) continue;
+      if ((cells.length !== 5 && cells.length !== columns.length) ||
+          [...cells].some(cell => cell.colSpan !== 1 || cell.rowSpan !== 1)) {
+        skipped += 1;
+        continue;
+      }
+      const station = normalize(label(cells[2].querySelector('a[href]'))) || normalize(label(cells[2]));
+      if (!station) {
+        skipped += 1;
+        continue;
+      }
+      if (station !== callsign) continue;
+
+      const program = cells[1].querySelector('a[href]');
+      const title = label(cells[1]) || program?.getAttribute('title')?.replace(/\s+/g, ' ').trim();
       const date = label(cells[3]);
       const number = label(cells[4]);
-      if (cells.length !== 6 || !title || !label(station) || !/\p{Number}/u.test(date) || !/\p{Number}/u.test(number)) {
-        throw stop('HAMLOG изменил строки списка выданных дипломов. Выдача остановлена.');
-      }
-      if (!matchesCallsign(station, callsign)) continue;
-      const href = cells[1]?.querySelector('a[href]')?.getAttribute('href');
-      const url = awardUrl(href, origin + account);
+      const hasDetails = /\p{Number}/u.test(date) && /\p{Number}/u.test(number);
+      const url = awardUrl(program?.getAttribute('href'), origin + account);
       const downloadUrl = certificateUrl(cells[5]?.querySelector('a[href]')?.getAttribute('href'));
+      // Without the last cell, date and number confirm that the earlier cells are in their usual positions.
+      if (!title || (!hasDetails && (cells.length !== columns.length || (!url && !downloadUrl)))) {
+        skipped += 1;
+        continue;
+      }
       const key = JSON.stringify([url || '', title.normalize('NFKC').toLowerCase(), date, number]);
-      issued.set(key, { key, url, title, label: `${title} №${number}`, downloadUrl });
+      if (ambiguous.has(key)) {
+        skipped += 1;
+        continue;
+      }
+      const previous = issued.get(key);
+      if (!hasDetails && previous && previous.downloadUrl !== downloadUrl) {
+        // Download tokens can change. They cannot identify separate diplomas across sessions.
+        issued.delete(key);
+        ambiguous.add(key);
+        skipped += 2;
+        continue;
+      }
+      const awardLabel = number && !/^[-–—]+$/u.test(number) ? `${title} №${number}` : title;
+      issued.set(key, {key, url, title, label: awardLabel, downloadUrl});
     }
-    return [...issued.values()];
+    if (requireComplete && skipped) {
+      throw stop('Получение новых дипломов приостановлено — не удалось сверить весь список. Уже выданные можно скачать отдельно.');
+    }
+    return {awards: [...issued.values()], skipped};
   }
 
   function catalogRequest(draw, start) {
@@ -199,9 +246,9 @@
     return body;
   }
 
-  async function catalog(callsign, signal) {
+  async function catalog(callsign, signal, options) {
     const root = await accountPage(callsign, signal);
-    const issued = issuedRows(root, callsign);
+    const {awards: issued, skipped: skippedIssued} = issuedRows(root, callsign, options);
     const national = root.querySelector('#gnawards-md #listgn tbody');
     const territorial = root.querySelectorAll('#tcawards-md table tbody');
     if (!national || !territorial.length) {
@@ -252,7 +299,7 @@
     } while (rowCount < total);
 
     if (unavailable) warnings.push(`Записей без доступной страницы диплома: ${unavailable}.`);
-    return { entries: [...entries.values()], warnings, issued };
+    return {entries: [...entries.values()], warnings, issued, skippedIssued};
   }
 
   function supportedAward(path) {
@@ -378,8 +425,8 @@
     const callsign = globalThis.hamlogCallsign.normalize(value);
     if (!callsign) throw stop('Укажите позывной в настройках расширения.');
     return Object.freeze({
-      catalog: (signal) => catalog(callsign, signal),
-      owned: async (signal) => issuedRows(await accountPage(callsign, signal), callsign),
+      catalog: (signal, options) => catalog(callsign, signal, options),
+      owned: async (signal, options) => issuedRows(await accountPage(callsign, signal), callsign, options),
       inspect: (entry, signal, options) => inspect(callsign, entry, signal, options),
       readCertificate: (url, signal) => readCertificate(callsign, url, signal)
     });

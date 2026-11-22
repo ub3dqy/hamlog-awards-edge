@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Дипломы HAMLOG",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "Проверка, получение и скачивание бесплатных электронных дипломов HAMLOG.",
   "homepage_url": "https://github.com/ub3dqy/hamlog-awards-edge",
   "permissions": ["activeTab", "scripting", "storage", "alarms"],

@@ -115,13 +115,17 @@
     return complete ? 'complete' : 'interrupted';
   }
 
-  async function load(progress, keys) {
-    if (!Array.isArray(keys) || !keys.every(validKey)) throw new Error('Invalid list of certificates');
+  async function load(progress, keys, complete = true) {
+    if (!Array.isArray(keys) || !keys.every(validKey) || typeof complete !== 'boolean') {
+      throw new Error('Invalid list of certificates');
+    }
     if (progress.flight) throw new Error('Unfinished archive');
     const available = new Set(keys);
     const files = await listFiles(progress.callsign);
-    const discarded = files.filter(file => !available.has(file.key));
-    if (discarded.length) await writeProgress(progress, discarded.map(file => file.key));
+    if (complete) {
+      const discarded = files.filter(file => !available.has(file.key));
+      if (discarded.length) await writeProgress(progress, discarded.map(file => file.key));
+    }
     return {
       parts: progress.parts,
       staged: files.filter(file => available.has(file.key)).map(file => file.key)
@@ -306,7 +310,7 @@
         if (message.partNumber === undefined || result === 'pending') return result;
         return progress.parts.length >= message.partNumber ? 'complete' : 'interrupted';
       }
-      case 'load': return load(progress, message.keys);
+      case 'load': return load(progress, message.keys, message.complete);
       case 'stage': return stage(task.callsign, message);
       case 'file': return readFile(task.callsign, message.key);
       case 'save': return save(progress, message);
