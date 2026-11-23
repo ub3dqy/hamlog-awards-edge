@@ -192,9 +192,9 @@
     const [injection] = await api.scripting.executeScript({target, files: scripts});
     if (injection?.error) throw new Error('Could not load the HAMLOG panel');
     const [execution] = await api.scripting.executeScript({
-      target, args: [task.callsign, task.token],
-      func: (callsign, token) => {
-        const job = globalThis.hamlogAwards?.run('download', callsign, undefined, token);
+      target, args: [task.callsign, task.token, task.retryKeys ?? null],
+      func: (callsign, token, retryKeys) => {
+        const job = globalThis.hamlogAwards?.run('download', callsign, undefined, token, {retryKeys});
         if (!job?.ok) return 'unavailable';
         return job.busy && !job.resumable ? 'busy' : 'started';
       }
@@ -214,11 +214,12 @@
     }
   }
 
-  async function launch(tabId) {
+  async function launch(tabId, retryKeys, expectedCallsign) {
     const {callsign: selected} = await api.storage.local.get('callsign');
     const callsign = globalThis.hamlogCallsign.normalize(selected);
     const tab = await findTab(tabId);
-    if (!callsign || !isHamlogTab(tab) || !await api.permissions.contains(access)) throw new Error('Invalid download context');
+    if (!callsign || (expectedCallsign && expectedCallsign !== callsign) ||
+        !isHamlogTab(tab) || !await api.permissions.contains(access)) throw new Error('Invalid download context');
     const current = await activeTask();
     if (current?.active) {
       if (current.callsign !== callsign) {
@@ -237,6 +238,7 @@
       }
     }
     const task = {callsign, tabId, token: crypto.randomUUID(), active: true};
+    if (retryKeys) task.retryKeys = retryKeys;
     await setTask(task);
     try {
       await inject(task);
@@ -298,6 +300,13 @@
         sender.tab.incognito || sender.frameId !== 0 || !isHamlog(sender.url) ||
         !await api.permissions.contains(access)) {
       throw new Error('Invalid download request');
+    }
+    if (message.action === 'retry') {
+      const {keys} = message;
+      if (task.active || !Array.isArray(keys) || !keys.length || !keys.every(validKey)) {
+        throw new Error('Invalid download retry');
+      }
+      return launch(task.tabId, [...new Set(keys)], task.callsign);
     }
     if (message.action === 'deactivate') {
       await setTask({...task, active: false});

@@ -4,6 +4,7 @@ const extensionApi = globalThis.browser ?? globalThis.chrome;
 const siteOrigin = "https://hamlog.online";
 const scanButton = document.getElementById("scan");
 const claimButton = document.getElementById("claim");
+const skipIssued = document.getElementById("skip-issued");
 const downloadButton = document.getElementById("download");
 const settingsLink = document.getElementById("settings");
 const callsignLine = document.getElementById("callsign");
@@ -18,6 +19,7 @@ let currentTab;
 function setButtonsEnabled(enabled) {
   scanButton.disabled = !enabled;
   claimButton.disabled = !enabled;
+  skipIssued.disabled = !enabled;
   downloadButton.disabled = !enabled;
 }
 
@@ -88,11 +90,10 @@ async function launch(mode) {
     });
     const [{ result }] = await extensionApi.scripting.executeScript({
       target,
-      args: [mode, callsign],
-      func: (operation, selectedCallsign) => {
+      args: [mode, callsign, skipIssued.checked],
+      func: (operation, selectedCallsign, skipIssued) => {
         if (typeof globalThis.hamlogAwards?.run !== "function") return false;
-        void globalThis.hamlogAwards.run(operation, selectedCallsign);
-        return true;
+        return globalThis.hamlogAwards.run(operation, selectedCallsign, undefined, undefined, {skipIssued})?.ok === true;
       }
     });
 

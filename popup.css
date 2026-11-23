@@ -70,6 +70,18 @@ header {
   gap: 8px;
 }
 
+.claim-option {
+  display: flex;
+  align-items: start;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.claim-option input {
+  margin: 3px 0 0;
+}
+
 button {
   border: 1px solid var(--button);
   border-radius: 6px;
